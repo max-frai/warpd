@@ -131,22 +131,23 @@ static struct {
     {"grid_border_color", "#ffffff", "The color of the grid border.",
      OPT_STRING},
 
-    {"hint_bgcolor", "#ffffff", "The background hint color.", OPT_STRING},
-    {"hint_fgcolor", "#333333", "The foreground hint color.", OPT_STRING},
+    {"hint_bgcolor", "#f8f9facc", "The background hint color (with alpha).",
+     OPT_STRING},
+    {"hint_fgcolor", "#1a1d29", "The foreground hint color.", OPT_STRING},
     {"hint_chars", "abcdefghijklmnopqrstuvwxyz",
      "The character set from which hints are generated. The total number of "
      "hints is the square of the size of this string. It may be desirable to "
      "increase this for larger screens or trim it to increase gaps between "
      "hints.",
      OPT_STRING},
-    {"hint_font", "Iosevka",
+    {"hint_font", "SF Pro Display",
      "The font name used by hints. Note: This is platform specific, in X it "
      "corresponds to a valid xft font name, on macos it corresponds to a "
      "postscript name.",
      OPT_STRING},
 
-    {"hint_size", "12", "Hint size (range: 1-1000)", OPT_INT},
-    {"hint_border_radius", "6", "Border radius.", OPT_INT},
+    {"hint_size", "25", "Hint size (range: 1-1000)", OPT_INT},
+    {"hint_border_radius", "12", "Border radius.", OPT_INT},
 
     {"hint_exit", "esc", "The exit key used for hint mode.", OPT_KEY},
     {"hint_undo", "backspace",
