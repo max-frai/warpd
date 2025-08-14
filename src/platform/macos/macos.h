@@ -9,10 +9,10 @@
 
 #include "../../platform.h"
 #include <ApplicationServices/ApplicationServices.h>
-#include <Cocoa/Cocoa.h>
 #include <Carbon/Carbon.h>
-#include <stdint.h>
+#include <Cocoa/Cocoa.h>
 #include <pthread.h>
+#include <stdint.h>
 
 /*
  * NOTE: our API uses an upper left origin (ULO) coordinate system, while
@@ -26,7 +26,7 @@
  */
 
 #define MAX_DRAWING_HOOKS 32
-#define MAX_BOXES 32
+#define MAX_BOXES	  32
 
 struct box {
 	int x;
@@ -67,9 +67,7 @@ struct screen {
 	size_t nr_boxes;
 
 	struct window *overlay;
-
 };
-
 
 void window_show(struct window *win);
 void window_hide(struct window *win);
@@ -114,15 +112,19 @@ void osx_mouse_get_position(screen_t *scr, int *x, int *y);
 void osx_mouse_show();
 void osx_mouse_hide();
 void osx_screen_get_dimensions(screen_t scr, int *w, int *h);
-void osx_screen_draw_box(screen_t scr, int x, int y, int w, int h, const char *color);
+void osx_screen_draw_box(screen_t scr, int x, int y, int w, int h,
+			 const char *color);
 void osx_screen_clear(screen_t scr);
 void osx_screen_list(screen_t scr[MAX_SCREENS], size_t *n);
-void osx_init_hint(const char *bg, const char *fg, int border_radius, const char *font_family);
+void osx_init_hint(const char *bg, const char *fg, int border_radius,
+		   const char *font_family);
 void osx_hint_draw(struct screen *scr, struct hint *hints, size_t n);
 void osx_scroll(int direction);
 void osx_copy_selection();
 void osx_monitor_file(const char *_path);
 void osx_input_interrupt();
 void osx_commit();
+void osx_switch_to_english_layout();
+void osx_restore_previous_layout();
 
 #endif

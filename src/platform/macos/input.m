@@ -15,6 +15,9 @@ static size_t grabbed_keys_sz = 0;
 
 static uint8_t passthrough_keys[256] = {0};
 
+static TISInputSourceRef saved_layout = NULL;
+static int shutting_down = 0;
+
 static CFMachPortRef tap;
 
 uint8_t active_mods = 0;
@@ -236,11 +239,11 @@ uint8_t osx_input_lookup_code(const char *name, int *shifted)
 	 * name lookups.
 	 */
 	for (i = 0; i < 256; i++) {
-		if (!strcmp(name, keymap[i].name)) {
+		if (keymap[i].name[0] && !strcmp(name, keymap[i].name)) {
 			*shifted = 0;
 			pthread_mutex_unlock(&keymap_mtx);
 			return i;
-		} else if (!strcmp(name, keymap[i].shifted_name)) {
+		} else if (keymap[i].shifted_name[0] && !strcmp(name, keymap[i].shifted_name)) {
 			*shifted = 1;
 			pthread_mutex_unlock(&keymap_mtx);
 			return i;
@@ -283,6 +286,12 @@ void osx_input_ungrab_keyboard()
 	dispatch_sync(dispatch_get_main_queue(), ^{
 		grabbed = 0;
 	});
+
+	// Restore previous layout when exiting warpd mode
+	NSLog(@"warpd: ungrabbing keyboard and restoring layout");
+	shutting_down = 1;
+	osx_restore_previous_layout();
+	shutting_down = 0;
 }
 
 void osx_input_grab_keyboard()
@@ -294,6 +303,10 @@ void osx_input_grab_keyboard()
 		grabbed = 1;
 		grabbed_time = get_time_ms();
 	});
+
+	// Switch to English layout when entering warpd mode
+	NSLog(@"warpd: grabbing keyboard and switching to English layout");
+	osx_switch_to_english_layout();
 }
 
 struct input_event *osx_input_next_event(int timeout)
@@ -334,6 +347,11 @@ struct input_event *osx_input_wait(struct input_event *keys, size_t sz)
 
 static void update_keymap()
 {
+	if (shutting_down) {
+		NSLog(@"warpd: skipping keymap update during shutdown");
+		return;
+	}
+
 	static uint8_t valid_keycodes[256] = {
 		[0x01] = 1, [0x02] = 1, [0x03] = 1, [0x04] = 1, [0x05] = 1, [0x06] = 1, [0x07] = 1, [0x08] = 1,
 		[0x09] = 1, [0x0a] = 1, [0x0b] = 1, [0x0c] = 1, [0x0d] = 1, [0x0e] = 1, [0x0f] = 1, [0x10] = 1,
@@ -361,7 +379,43 @@ static void update_keymap()
 	CFStringRef str;
 	TISInputSourceRef kbd = TISCopyCurrentKeyboardLayoutInputSource();
 
-	assert(kbd);
+	if (!kbd) {
+		NSLog(@"warpd: ERROR - failed to get current keyboard layout");
+		pthread_mutex_unlock(&keymap_mtx);
+		return;
+	}
+
+	CFDataRef layout_data = TISGetInputSourceProperty(kbd, kTISPropertyUnicodeKeyLayoutData);
+	if (!layout_data) {
+		NSLog(@"warpd: ERROR - failed to get keyboard layout data (layout may not support Unicode)");
+		CFRelease(kbd);
+		pthread_mutex_unlock(&keymap_mtx);
+		return;
+	}
+
+	const UCKeyboardLayout *layout = (const UCKeyboardLayout *)CFDataGetBytePtr(layout_data);
+	if (!layout) {
+		NSLog(@"warpd: ERROR - failed to get keyboard layout pointer");
+		CFRelease(kbd);
+		pthread_mutex_unlock(&keymap_mtx);
+		return;
+	}
+
+	// Log the layout we're processing
+	CFStringRef layout_name = (CFStringRef)TISGetInputSourceProperty(kbd, kTISPropertyLocalizedName);
+	CFStringRef layout_id = (CFStringRef)TISGetInputSourceProperty(kbd, kTISPropertyInputSourceID);
+
+	char name_str[256] = "unknown";
+	char id_str[256] = "unknown";
+
+	if (layout_name) {
+		CFStringGetCString(layout_name, name_str, sizeof(name_str), kCFStringEncodingUTF8);
+	}
+	if (layout_id) {
+		CFStringGetCString(layout_id, id_str, sizeof(id_str), kCFStringEncodingUTF8);
+	}
+
+	NSLog(@"warpd: processing keymap for layout '%s' (%s)", name_str, id_str);
 
 	for (code = 1; code < 256; code++) {
 		if (!valid_keycodes[code]) {
@@ -370,25 +424,37 @@ static void update_keymap()
 			continue;
 		}
 
-		/* Blech */
-		CFDataRef layout_data = TISGetInputSourceProperty(kbd, kTISPropertyUnicodeKeyLayoutData);
-		const UCKeyboardLayout *layout = (const UCKeyboardLayout *)CFDataGetBytePtr(layout_data);
-
-		UCKeyTranslate(layout, code-1, kUCKeyActionDisplay, 0, LMGetKbdType(),
+		OSStatus status = UCKeyTranslate(layout, code-1, kUCKeyActionDisplay, 0, LMGetKbdType(),
 			       kUCKeyTranslateNoDeadKeysBit, &deadkeystate,
 			       sizeof(chars) / sizeof(chars[0]), &len, chars);
 
-		str = CFStringCreateWithCharacters(kCFAllocatorDefault, chars, 1);
-		CFStringGetCString(str, keymap[code].name, 32, kCFStringEncodingUTF8);
-		CFRelease(str);
+		if (status == noErr && len > 0) {
+			str = CFStringCreateWithCharacters(kCFAllocatorDefault, chars, 1);
+			if (str) {
+				if (!CFStringGetCString(str, keymap[code].name, 31, kCFStringEncodingUTF8)) {
+					keymap[code].name[0] = 0;
+				}
+				CFRelease(str);
+			}
+		} else {
+			keymap[code].name[0] = 0;
+		}
 
-		UCKeyTranslate(layout, code-1, kUCKeyActionDisplay, 2, LMGetKbdType(),
+		status = UCKeyTranslate(layout, code-1, kUCKeyActionDisplay, 2, LMGetKbdType(),
 			       kUCKeyTranslateNoDeadKeysBit, &deadkeystate,
 			       sizeof(chars) / sizeof(chars[0]), &len, chars);
 
-		str = CFStringCreateWithCharacters(kCFAllocatorDefault, chars, 1);
-		CFStringGetCString(str, keymap[code].shifted_name, 32, kCFStringEncodingUTF8);
-		CFRelease(str);
+		if (status == noErr && len > 0) {
+			str = CFStringCreateWithCharacters(kCFAllocatorDefault, chars, 1);
+			if (str) {
+				if (!CFStringGetCString(str, keymap[code].shifted_name, 31, kCFStringEncodingUTF8)) {
+					keymap[code].shifted_name[0] = 0;
+				}
+				CFRelease(str);
+			}
+		} else {
+			keymap[code].shifted_name[0] = 0;
+		}
 
 		//TODO: probably missing some keys...
 #define fixup(keyname, newname) \
@@ -452,7 +518,124 @@ static void update_keymap()
 
 	}
 
+	CFRelease(kbd);
+
 	pthread_mutex_unlock(&keymap_mtx);
+}
+
+void osx_switch_to_english_layout()
+{
+	NSLog(@"warpd: switch_to_english_layout called");
+
+	// Don't save if we already have one saved
+	if (saved_layout) {
+		NSLog(@"warpd: layout already saved, not overwriting");
+		return;
+	} else {
+		saved_layout = TISCopyCurrentKeyboardInputSource();
+		NSLog(@"warpd: saved current layout for restoration");
+	}
+
+	// Log current layout before switching
+	CFStringRef current_id = NULL;
+	CFStringRef current_name = NULL;
+	TISInputSourceRef current_layout = TISCopyCurrentKeyboardInputSource();
+
+	if (current_layout) {
+		current_id = (CFStringRef)TISGetInputSourceProperty(current_layout, kTISPropertyInputSourceID);
+		current_name = (CFStringRef)TISGetInputSourceProperty(current_layout, kTISPropertyLocalizedName);
+	}
+
+	char current_id_str[256] = "unknown";
+	char current_name_str[256] = "unknown";
+
+	if (current_id) {
+		CFStringGetCString(current_id, current_id_str, sizeof(current_id_str), kCFStringEncodingUTF8);
+	}
+	if (current_name) {
+		CFStringGetCString(current_name, current_name_str, sizeof(current_name_str), kCFStringEncodingUTF8);
+	}
+
+	NSLog(@"warpd: switching layout from '%s' (%s) to English", current_name_str, current_id_str);
+
+	// Check if we're already on English
+	if (current_id && (CFStringCompare(current_id, CFSTR("com.apple.keylayout.US"), 0) == kCFCompareEqualTo ||
+	                   CFStringCompare(current_id, CFSTR("com.apple.keylayout.ABC"), 0) == kCFCompareEqualTo)) {
+		NSLog(@"warpd: already on English layout, no switch needed");
+		if (current_layout) CFRelease(current_layout);
+		return;
+	}
+
+	CFArrayRef input_sources = TISCreateInputSourceList(NULL, false);
+	if (!input_sources) {
+		NSLog(@"warpd: failed to get input source list");
+		if (current_layout) CFRelease(current_layout);
+		return;
+	}
+
+	CFIndex count = CFArrayGetCount(input_sources);
+	bool switched = false;
+
+	for (CFIndex i = 0; i < count; i++) {
+		TISInputSourceRef source = (TISInputSourceRef)CFArrayGetValueAtIndex(input_sources, i);
+
+		CFStringRef source_id = (CFStringRef)TISGetInputSourceProperty(source, kTISPropertyInputSourceID);
+		if (source_id && (CFStringCompare(source_id, CFSTR("com.apple.keylayout.US"), 0) == kCFCompareEqualTo ||
+		                  CFStringCompare(source_id, CFSTR("com.apple.keylayout.ABC"), 0) == kCFCompareEqualTo)) {
+
+			char target_id_str[256];
+			CFStringGetCString(source_id, target_id_str, sizeof(target_id_str), kCFStringEncodingUTF8);
+
+			OSStatus status = TISSelectInputSource(source);
+			if (status == noErr) {
+				NSLog(@"warpd: successfully switched to English layout (%s)", target_id_str);
+				switched = true;
+			} else {
+				NSLog(@"warpd: failed to switch to English layout, error: %d", (int)status);
+			}
+			break;
+		}
+	}
+
+	if (!switched) {
+		NSLog(@"warpd: warning - no English layout found, continuing with current layout");
+	}
+
+	CFRelease(input_sources);
+	if (current_layout) CFRelease(current_layout);
+}
+
+void osx_restore_previous_layout()
+{
+	NSLog(@"warpd: restore_previous_layout called");
+
+	if (saved_layout) {
+		dispatch_sync(dispatch_get_main_queue(), ^{
+			NSLog(@"warpd: attempting to restore previous layout");
+
+			OSStatus status = TISSelectInputSource(saved_layout);
+			if (status == noErr) {
+				NSLog(@"warpd: successfully restored previous layout");
+			} else {
+				NSLog(@"warpd: failed to restore previous layout, error: %d", (int)status);
+			}
+
+			CFRelease(saved_layout);
+			saved_layout = NULL;
+		});
+	} else {
+		NSLog(@"warpd: no previous layout to restore - saved_layout is NULL");
+	}
+}
+
+// Safe wrapper for update_keymap that can be called from notifications
+static void safe_update_keymap(CFNotificationCenterRef center, void *observer, CFStringRef name, const void *object, CFDictionaryRef userInfo)
+{
+	NSLog(@"warpd: keyboard layout change notification received");
+	// Dispatch to a background queue to avoid blocking notification delivery
+	dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_LOW, 0), ^{
+		update_keymap();
+	});
 }
 
 /* Called by the main thread to set up event stream. */
@@ -494,11 +677,15 @@ void macos_init_input()
 	CGEventTapEnable(tap, true);
 
 	CFNotificationCenterAddObserver(
-	    CFNotificationCenterGetLocalCenter(), NULL, update_keymap,
+	    CFNotificationCenterGetLocalCenter(), NULL, safe_update_keymap,
 	    CFSTR("NSTextInputContextKeyboardSelectionDidChangeNotification"),
 	    NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
 
-	update_keymap();
+	// Initialize keymap in background to avoid blocking startup
+	NSLog(@"warpd: scheduling initial keymap build");
+	dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_LOW, 0), ^{
+		update_keymap();
+	});
 
 	if (pipe(input_fds) < 0) {
 		perror("pipe");
