@@ -24,6 +24,8 @@ static void draw_hook(void *arg, NSView *view)
 
 void osx_hint_draw(struct screen *scr, struct hint *hints, size_t n)
 {
+
+
 	scr->nr_hints = n;
 	memcpy(scr->hints, hints, sizeof(struct hint)*n);
 
@@ -39,4 +41,3 @@ void osx_init_hint(const char *bg, const char *fg, int _border_radius,
 	border_radius = (float)_border_radius;
 	font = font_family;
 }
-

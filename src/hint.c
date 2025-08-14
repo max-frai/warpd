@@ -8,6 +8,7 @@
 
 struct hint *hints;
 struct hint matched[MAX_HINTS];
+static size_t matched_indices[MAX_HINTS];
 
 static size_t nr_hints;
 static size_t nr_matched;
@@ -45,54 +46,269 @@ static void get_hint_size(screen_t scr, int *w, int *h)
 	*h = (sh * config_get_int("hint_size")) / 1000;
 }
 
-static size_t generate_fullscreen_hints(screen_t scr, struct hint *hints)
+static int hint_screen_x[MAX_HINTS];
+static int hint_screen_y[MAX_HINTS];
+
+static size_t generate_multiscreen_hints(struct hint *hints)
 {
-	int sw, sh;
-	int w, h;
-	int i, j;
-	size_t n = 0;
-
+	screen_t screens[MAX_SCREENS];
+	size_t screen_count;
 	const char *chars = config_get("hint_chars");
-	get_hint_size(scr, &w, &h);
-	platform->screen_get_dimensions(scr, &sw, &sh);
+	size_t chars_len = strlen(chars);
+	int w, h;
+	size_t total_hints = 0;
 
-	const int nr = strlen(chars);
-	const int nc = strlen(chars);
+	platform->screen_list(screens, &screen_count);
 
+	// Calculate hints per screen - use first screen as reference
+	get_hint_size(screens[0], &w, &h);
 
-	const int colgap = sw / nc - w;
-	const int rowgap = sh / nr - h;
+	int nc = chars_len;
+	int nr = chars_len;
 
-	const int x_offset = (sw - nc * w - (nc - 1) * colgap) / 2;
-	const int y_offset = (sh - nr * h - (nr - 1) * rowgap) / 2;
+	size_t hints_per_screen = nc * nr;
+	size_t total_positions = hints_per_screen * screen_count;
 
-	int x = x_offset;
-	int y = y_offset;
+	// Generate enough unique labels to cover all screens
+	char labels[MAX_HINTS][4];
+	size_t label_count = 0;
 
-	get_hint_size(scr, &w, &h);
-
-	for (i = 0; i < nc; i++) {
-		for (j = 0; j < nr; j++) {
-			struct hint *hint = &hints[n++];
-
-			hint->x = x;
-			hint->y = y;
-
-			hint->w = w;
-			hint->h = h;
-
-			hint->label[0] = chars[i];
-			hint->label[1] = chars[j];
-			hint->label[2] = 0;
-
-			y += rowgap + h;
+	// For multi-screen or if we need more than 676 hints, use 3-character
+	// labels for consistency
+	if (screen_count > 1 || total_positions > 676) {
+		// Generate 3-character labels for all hints
+		for (size_t i = 0; i < chars_len && label_count < MAX_HINTS &&
+				   label_count < total_positions;
+		     i++) {
+			for (size_t j = 0;
+			     j < chars_len && label_count < MAX_HINTS &&
+			     label_count < total_positions;
+			     j++) {
+				for (size_t k = 0;
+				     k < chars_len && label_count < MAX_HINTS &&
+				     label_count < total_positions;
+				     k++) {
+					labels[label_count][0] = chars[i];
+					labels[label_count][1] = chars[j];
+					labels[label_count][2] = chars[k];
+					labels[label_count][3] = 0;
+					label_count++;
+				}
+			}
 		}
-
-		y = y_offset;
-		x += colgap + w;
+	} else {
+		// Generate 2-character labels for single screen with <= 676
+		// hints
+		for (size_t i = 0; i < chars_len && label_count < MAX_HINTS;
+		     i++) {
+			for (size_t j = 0;
+			     j < chars_len && label_count < MAX_HINTS; j++) {
+				labels[label_count][0] = chars[i];
+				labels[label_count][1] = chars[j];
+				labels[label_count][2] = 0;
+				label_count++;
+			}
+		}
 	}
 
-	return n;
+	// Distribute hints across screens
+	size_t label_index = 0;
+	for (size_t screen_idx = 0;
+	     screen_idx < screen_count && total_hints < MAX_HINTS;
+	     screen_idx++) {
+		int sw, sh;
+		platform->screen_get_dimensions(screens[screen_idx], &sw, &sh);
+		get_hint_size(screens[screen_idx], &w, &h);
+
+		int colgap = sw / nc - w;
+		int rowgap = sh / nr - h;
+
+		int x_offset = colgap / 2;
+		int y_offset = rowgap / 2;
+
+		int y = y_offset;
+		for (int i = 0; i < nr && label_index < label_count &&
+				total_hints < MAX_HINTS;
+		     i++) {
+			int x = x_offset;
+			for (int j = 0; j < nc && label_index < label_count &&
+					total_hints < MAX_HINTS;
+			     j++) {
+				hints[total_hints].x = x;
+				hints[total_hints].y = y;
+				hints[total_hints].w = w;
+				hints[total_hints].h = h;
+				strcpy(hints[total_hints].label,
+				       labels[label_index]);
+				// Store screen index instead of coordinates
+				hint_screen_x[total_hints] = screen_idx;
+				hint_screen_y[total_hints] = 0;
+
+				total_hints++;
+				label_index++;
+				x += colgap + w;
+			}
+			y += rowgap + h;
+		}
+	}
+
+	return total_hints;
+}
+
+static void draw_hints_on_all_screens(const char *filter_str)
+{
+	screen_t screens[MAX_SCREENS];
+	size_t screen_count;
+	platform->screen_list(screens, &screen_count);
+
+	// Clear all screens first
+	for (size_t i = 0; i < screen_count; i++) {
+		platform->screen_clear(screens[i]);
+	}
+
+	// Group hints by screen and draw them
+	for (size_t i = 0; i < screen_count; i++) {
+		struct hint screen_hints[MAX_HINTS];
+		size_t screen_hint_count = 0;
+
+		for (size_t j = 0; j < nr_hints; j++) {
+			if (hint_screen_x[j] == (int)i) {
+				if (filter_str[0] == 0 ||
+				    strncmp(hints[j].label, filter_str,
+					    strlen(filter_str)) == 0) {
+					screen_hints[screen_hint_count++] =
+					    hints[j];
+				}
+			}
+		}
+
+		if (screen_hint_count > 0) {
+			platform->hint_draw(screens[i], screen_hints,
+					    screen_hint_count);
+		}
+	}
+
+	// Update matched hints for global matching
+	nr_matched = 0;
+	for (size_t i = 0; i < nr_hints && nr_matched < MAX_HINTS; i++) {
+		if (filter_str[0] == 0 || strncmp(hints[i].label, filter_str,
+						  strlen(filter_str)) == 0) {
+			matched[nr_matched] = hints[i];
+			matched_indices[nr_matched] = i;
+			nr_matched++;
+		}
+	}
+
+	platform->commit();
+}
+
+static int hint_selection_multiscreen(struct hint *_hints, size_t _nr_hints)
+{
+	hints = _hints;
+	nr_hints = _nr_hints;
+
+	draw_hints_on_all_screens("");
+
+	int rc = 0;
+	char buf[32] = {0};
+	platform->input_grab_keyboard();
+
+	platform->mouse_hide();
+
+	const char *keys[] = {
+	    "hint_exit",
+	    "hint_undo_all",
+	    "hint_undo",
+	};
+
+	config_input_whitelist(keys, sizeof keys / sizeof keys[0]);
+
+	while (1) {
+		struct input_event *ev;
+		ssize_t len;
+
+		ev = platform->input_next_event(0);
+
+		if (!ev->pressed)
+			continue;
+
+		len = strlen(buf);
+
+		if (config_input_match(ev, "hint_exit")) {
+			rc = -1;
+			break;
+		} else if (config_input_match(ev, "hint_undo_all")) {
+			buf[0] = 0;
+		} else if (config_input_match(ev, "hint_undo")) {
+			if (len)
+				buf[len - 1] = 0;
+		} else {
+			const char *name = input_event_tostr(ev);
+
+			if (!name || name[1])
+				continue;
+
+			buf[len++] = name[0];
+			buf[len] = 0;
+		}
+
+		draw_hints_on_all_screens(buf);
+
+		if (nr_matched == 1) {
+			int nx, ny;
+			struct hint *h = &matched[0];
+			screen_t target_screen = NULL;
+
+			// Find the target screen by index
+			screen_t screens[MAX_SCREENS];
+			size_t screen_count;
+			platform->screen_list(screens, &screen_count);
+
+			size_t hint_index = matched_indices[0];
+
+			if (hint_index >= MAX_HINTS) {
+				break;
+			}
+
+			if (hint_screen_x[hint_index] < (int)screen_count) {
+				target_screen =
+				    screens[hint_screen_x[hint_index]];
+			}
+
+			if (target_screen == NULL) {
+				break;
+			}
+
+			for (size_t i = 0; i < screen_count; i++) {
+				platform->screen_clear(screens[i]);
+			}
+
+			nx = h->x + h->w / 2;
+			ny = h->y + h->h / 2;
+
+			platform->mouse_move(target_screen, nx + 1, ny + 1);
+			platform->mouse_move(target_screen, nx, ny);
+			strcpy(last_selected_hint, buf);
+			break;
+		} else if (nr_matched == 0) {
+			// Don't exit - just continue waiting for more input
+			// The user might type more characters to match a hint
+		}
+	}
+
+	platform->input_ungrab_keyboard();
+
+	screen_t screens[MAX_SCREENS];
+	size_t screen_count;
+	platform->screen_list(screens, &screen_count);
+
+	for (size_t i = 0; i < screen_count; i++) {
+		platform->screen_clear(screens[i]);
+	}
+
+	platform->mouse_show();
+	platform->commit();
+	return rc;
 }
 
 static int hint_selection(screen_t scr, struct hint *_hints, size_t _nr_hints)
@@ -109,9 +325,9 @@ static int hint_selection(screen_t scr, struct hint *_hints, size_t _nr_hints)
 	platform->mouse_hide();
 
 	const char *keys[] = {
-		"hint_exit",
-		"hint_undo_all",
-		"hint_undo",
+	    "hint_exit",
+	    "hint_undo_all",
+	    "hint_undo",
 	};
 
 	config_input_whitelist(keys, sizeof keys / sizeof keys[0]);
@@ -160,7 +376,7 @@ static int hint_selection(screen_t scr, struct hint *_hints, size_t _nr_hints)
 			 * text selection widgets which don't like spontaneous
 			 * cursor warping.
 			 */
-			platform->mouse_move(scr, nx+1, ny+1);
+			platform->mouse_move(scr, nx + 1, ny + 1);
 
 			platform->mouse_move(scr, nx, ny);
 			strcpy(last_selected_hint, buf);
@@ -184,7 +400,7 @@ static int sift()
 	int hint_sz = config_get_int("hint2_size");
 
 	const char *chars = config_get("hint2_chars");
-	size_t chars_len= strlen(chars);
+	size_t chars_len = strlen(chars);
 
 	int grid_sz = config_get_int("hint2_grid_size");
 
@@ -222,17 +438,16 @@ static int sift()
 
 				n++;
 			}
-	}
+		}
 
 	return hint_selection(scr, hints, n);
 }
 
 void init_hints()
 {
-	platform->init_hint(config_get("hint_bgcolor"),
-			    config_get("hint_fgcolor"),
-			    config_get_int("hint_border_radius"),
-			    config_get("hint_font"));
+	platform->init_hint(
+	    config_get("hint_bgcolor"), config_get("hint_fgcolor"),
+	    config_get_int("hint_border_radius"), config_get("hint_font"));
 }
 
 int hintspec_mode()
@@ -249,15 +464,13 @@ int hintspec_mode()
 
 	get_hint_size(scr, &w, &h);
 
-	while (scanf("%15s %d %d",
-		hints[n].label,
-		&hints[n].x,
-		&hints[n].y) == 3) {
+	while (scanf("%15s %d %d", hints[n].label, &hints[n].x, &hints[n].y) ==
+	       3) {
 
 		hints[n].w = w;
 		hints[n].h = h;
-		hints[n].x -= w/2;
-		hints[n].y -= h/2;
+		hints[n].x -= w / 2;
+		hints[n].y -= h / 2;
 
 		n++;
 	}
@@ -274,9 +487,9 @@ int full_hint_mode(int second_pass)
 	platform->mouse_get_position(&scr, &mx, &my);
 	hist_add(mx, my);
 
-	nr_hints = generate_fullscreen_hints(scr, hints);
+	nr_hints = generate_multiscreen_hints(hints);
 
-	if (hint_selection(scr, hints, nr_hints))
+	if (hint_selection_multiscreen(hints, nr_hints))
 		return -1;
 
 	if (second_pass)
@@ -305,10 +518,10 @@ int history_hint_mode()
 		hints[i].w = w;
 		hints[i].h = h;
 
-		hints[i].x = ents[i].x - w/2;
-		hints[i].y = ents[i].y - h/2;
+		hints[i].x = ents[i].x - w / 2;
+		hints[i].y = ents[i].y - h / 2;
 
-		hints[i].label[0] = 'a'+i;
+		hints[i].label[0] = 'a' + i;
 		hints[i].label[1] = 0;
 	}
 

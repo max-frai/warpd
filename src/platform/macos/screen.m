@@ -43,6 +43,7 @@ void osx_screen_list(struct screen *rscreens[MAX_SCREENS], size_t *n)
 void osx_screen_clear(struct screen *scr)
 {
 	scr->nr_boxes = 0;
+	scr->nr_hints = 0;
 	scr->overlay->nr_hooks = 0;
 }
 
